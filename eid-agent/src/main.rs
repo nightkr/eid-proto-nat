@@ -3,7 +3,13 @@ use std::{path::PathBuf, pin::pin, sync::Arc};
 use clap::Parser;
 use eid_agent_proto::{ChallengeResponse, Encrypted, Request, Response, RpcMsg, Signed};
 use futures::{Sink, SinkExt, Stream, TryFutureExt, TryStreamExt};
-use openssl::x509::X509;
+use openssl::{
+    ssl::SslFiletype,
+    x509::{
+        store::{X509Lookup, X509StoreBuilder, X509StoreRef},
+        X509,
+    },
+};
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use tokio::{fs, net::TcpListener};
 use tracing::Instrument;
@@ -15,6 +21,8 @@ struct Opts {
     key: PathBuf,
     #[clap(long)]
     cert: PathBuf,
+    #[clap(long)]
+    ca: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -30,6 +38,14 @@ async fn main() -> color_eyre::Result<()> {
         &fs::read(&opts.key).await?,
     )?);
     let cert = Arc::new(X509::from_pem(&fs::read(&opts.cert).await?)?);
+    let trust_store = {
+        let mut builder = X509StoreBuilder::new()?;
+        let lookup = builder.add_lookup(X509Lookup::file())?;
+        for ca in opts.ca {
+            lookup.load_cert_file(ca, SslFiletype::PEM)?;
+        }
+        Arc::new(builder.build())
+    };
     let rng = SystemRandom::new();
     let listener = TcpListener::bind(("127.0.0.1", 9187)).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
@@ -37,12 +53,13 @@ async fn main() -> color_eyre::Result<()> {
         let (sock, peer) = listener.accept().await?;
         let keypair = keypair.clone();
         let cert = cert.clone();
+        let trust_store = trust_store.clone();
         let rng = rng.clone();
         tokio::spawn(
             async move {
                 tracing::info!("new connection");
                 let sock = tokio_tungstenite::accept_async(sock).await?;
-                handle_socket(sock, &rng, &keypair, &cert).await
+                handle_socket(sock, &rng, &keypair, &cert, &trust_store).await
             }
             .unwrap_or_else(|error: color_eyre::Report| {
                 tracing::error!(?error, "error processing connection")
@@ -57,6 +74,7 @@ async fn handle_socket<S>(
     rng: &SystemRandom,
     keypair: &Ed25519KeyPair,
     cert: &X509,
+    trust_store: &X509StoreRef,
 ) -> color_eyre::Result<()>
 where
     S: Stream<Item = tungstenite::Result<tungstenite::Message>>
@@ -75,7 +93,7 @@ where
         let res: Response = match req.msg {
             Request::Ping => Response::Ok,
             Request::Identify { challenge } => {
-                let (challenger_cert, challenge) = challenge.verify()?;
+                let (challenger_cert, challenge) = challenge.verify(trust_store)?;
                 // TODO: prompt user for confirmation
                 let response = ChallengeResponse {
                     nonce: challenge.nonce,

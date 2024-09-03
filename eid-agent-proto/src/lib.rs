@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use openssl::{
     pkey::{Id, PKey},
-    x509::X509,
+    stack::Stack,
+    x509::{store::X509StoreRef, X509StoreContext, X509},
 };
 use ring::{
     aead::{self, Aad, BoundKey, AES_256_GCM},
@@ -56,7 +57,7 @@ impl<T> Signed<T> {
         })
     }
 
-    pub fn verify(&self) -> color_eyre::Result<(X509, T)>
+    pub fn verify(&self, trust_store: &X509StoreRef) -> color_eyre::Result<(X509, T)>
     where
         T: DeserializeOwned + HasCertificate,
     {
@@ -71,7 +72,16 @@ impl<T> Signed<T> {
         assert!(cert.public_key()?.public_eq(
             PKey::public_key_from_raw_bytes(&self.signer_pubkey, Id::ED25519)?.as_ref()
         ));
-        // TODO: verify trust
+        X509StoreContext::new()?.init(trust_store, &cert, Stack::new()?.as_ref(), |ctx| {
+            if ctx.verify_cert()? {
+                Ok(Ok(()))
+            } else {
+                Ok(Err(color_eyre::Report::msg(format!(
+                    "peer certificate is not trusted: {}",
+                    ctx.error()
+                ))))
+            }
+        })??;
         // TODO: verify key usage
         Ok((cert, message))
     }

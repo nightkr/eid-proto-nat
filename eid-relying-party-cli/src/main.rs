@@ -7,7 +7,13 @@ use clap::Parser;
 use color_eyre::eyre::{Context, ContextCompat};
 use eid_agent_proto::{Challenge, Request, Response, RpcMsg, Signed};
 use futures::{Sink, SinkExt, Stream, TryStreamExt};
-use openssl::x509::X509;
+use openssl::{
+    ssl::SslFiletype,
+    x509::{
+        store::{X509Lookup, X509StoreBuilder},
+        X509,
+    },
+};
 use pin_project::pin_project;
 use ring::{
     agreement::{self, X25519},
@@ -26,6 +32,8 @@ struct Opts {
     key: PathBuf,
     #[clap(long)]
     cert: PathBuf,
+    #[clap(long)]
+    ca: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -39,11 +47,19 @@ async fn main() -> color_eyre::Result<()> {
     let opts = Opts::parse();
     let keypair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&fs::read(&opts.key).await?)?;
     let cert = X509::from_pem(&fs::read(&opts.cert).await?)?;
+    let trust_store = {
+        let mut builder = X509StoreBuilder::new()?;
+        let lookup = builder.add_lookup(X509Lookup::file())?;
+        for ca in opts.ca {
+            lookup.load_cert_file(ca, SslFiletype::PEM)?;
+        }
+        builder.build()
+    };
     let rng = SystemRandom::new();
     let mut conn = pin!(AgentClient::new(
         tokio_tungstenite::connect_async(&opts.agent).await?.0
     ));
-    dbg!(conn.send_request(Request::Ping).await?);
+    conn.send_request(Request::Ping).await?;
     let challenger_session_key_private = agreement::EphemeralPrivateKey::generate(&X25519, &rng)?;
     let challenge = Challenge {
         nonce: rand::generate(&rng)?.expose(),
@@ -53,17 +69,16 @@ async fn main() -> color_eyre::Result<()> {
             .to_vec(),
         certificate: cert.to_der()?,
     };
-    let challenge_response = dbg!(
-        conn.send_request(Request::Identify {
-            challenge: Signed::sign(&challenge, &keypair)?
+    let challenge_response = conn
+        .send_request(Request::Identify {
+            challenge: Signed::sign(&challenge, &keypair)?,
         })
-        .await?
-    );
+        .await?;
     match challenge_response {
         Response::SignedChallenge { response_token } => {
             let response_token =
                 response_token.decrypt(challenger_session_key_private, challenge.nonce)?;
-            let (user_cert, response) = response_token.verify()?;
+            let (user_cert, response) = response_token.verify(&trust_store)?;
             let identities = user_cert
                 .subject_alt_names()
                 .into_iter()
