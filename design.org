@@ -1,0 +1,59 @@
+#+title: design specs and notes
+
+* parties
+
+** user
+
+The human trying to authorize an action (such as identifying themself, or approving a transaction).
+
+** relying party (RP)
+
+A service that requests that the user should authorize an operation.
+
+*** proxy RP
+
+A service that acts on the user's behalf against another "true" RP.
+
+** identity provider (IdP)
+
+A service that certifies the user's identity in some fashion, and provides them with a certificate.
+
+** agent
+
+Holds a single user's keys on their behalf, and signs operations with their approval.
+
+*** proxy agent
+
+Implements the agent protocol by forwarding to another agent. For example:
+
+- Web app frontend proxies between backend server and client's local agent
+- Local agent forwards to app running on phone
+
+* rules
+
+- no centralized SPOF involved in transactions
+- focus on standardizing agent protocol, RP and IdP /must/ be agent-agnostic
+- hide transactions from IdP
+- keep user identity private
+- protect against replay attacks, each action is only valid once, and within a single session
+- we don't need to support everything now, decide on where extensibility belongs
+- validate RP somehow
+
+* one primitive operation: authorizeAction
+
+- challenge/response protocol
+
+** challenges : rp -> agent
+
+- Public
+- Identify the challenger
+- Should not identify the user
+  - /Any/ user can "claim" a challenge by responding to it
+- Later: private auxdata
+
+** responses : agent -> rp
+
+- Private (hidden from proxies)
+- Must identify the user
+- Must identify the challenge to avoid replay attacks
+- Must identify the challenger to avoid MitM

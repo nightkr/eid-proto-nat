@@ -1,0 +1,20 @@
+[package]
+name = "eid-relying-party-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.16", features = ["env", "derive"] }
+color-eyre = "0.6.3"
+eid-agent-proto = { version = "0.1.0", path = "../eid-agent-proto" }
+futures = "0.3.30"
+pin-project = "1.1.5"
+ring = "0.17.8"
+serde = { version = "1.0.209", features = ["derive"] }
+serde_json = "1.0.127"
+tokio = { version = "1.39.3", features = ["macros", "rt-multi-thread", "fs"] }
+tokio-tungstenite = "0.23.1"
+tracing = "0.1.40"
+tracing-error = "0.2.0"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tungstenite = "0.23"
