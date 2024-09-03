@@ -1,17 +1,26 @@
-use std::{path::PathBuf, pin::pin, sync::Arc};
+use std::{
+    io::Write,
+    path::PathBuf,
+    pin::pin,
+    sync::{Arc, LazyLock},
+};
 
 use clap::Parser;
 use eid_agent_proto::{ChallengeResponse, Encrypted, Request, Response, RpcMsg, Signed};
-use futures::{Sink, SinkExt, Stream, TryFutureExt, TryStreamExt};
+use futures::{lock::Mutex, Sink, SinkExt, Stream, TryFutureExt, TryStreamExt};
 use openssl::{
     ssl::SslFiletype,
     x509::{
         store::{X509Lookup, X509StoreBuilder, X509StoreRef},
-        X509,
+        X509Ref, X509,
     },
 };
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
-use tokio::{fs, net::TcpListener};
+use tokio::{
+    fs,
+    io::{stdin, AsyncBufReadExt, BufReader, Stdin},
+    net::TcpListener,
+};
 use tracing::Instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -94,6 +103,7 @@ where
             Request::Ping => Response::Ok,
             Request::Identify { challenge } => {
                 let (challenger_cert, challenge) = challenge.verify(trust_store)?;
+                ask_confirm_challenge(&challenger_cert).await?;
                 // TODO: prompt user for confirmation
                 let response = ChallengeResponse {
                     nonce: challenge.nonce,
@@ -117,5 +127,24 @@ where
         tracing::debug!(?res, "sending response");
         sock.send(tungstenite::Message::text(serde_json::to_string(&res)?))
             .await?;
+    }
+}
+
+static STDIN: LazyLock<Mutex<BufReader<Stdin>>> =
+    LazyLock::new(|| Mutex::new(BufReader::new(stdin())));
+
+async fn ask_confirm_challenge(challenger_cert: &X509Ref) -> color_eyre::Result<()> {
+    let mut stdin = STDIN.lock().await;
+    print!(
+        "Allow authentication request from {:?}? [y/N] ",
+        challenger_cert.subject_name()
+    );
+    std::io::stdout().flush()?;
+    let mut response = String::new();
+    stdin.read_line(&mut response).await?;
+    if response.trim().eq_ignore_ascii_case("y") {
+        Ok(())
+    } else {
+        Err(color_eyre::Report::msg("request denied by user"))
     }
 }
