@@ -1,5 +1,9 @@
 use std::marker::PhantomData;
 
+use openssl::{
+    pkey::{Id, PKey},
+    x509::X509,
+};
 use ring::{
     aead::{self, Aad, BoundKey, AES_256_GCM},
     agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519},
@@ -32,7 +36,6 @@ pub enum Response {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Signed<T> {
-    // TODO: replace with certificate
     pub signer_pubkey: Vec<u8>,
     pub signature: Vec<u8>,
     pub message: Vec<u8>,
@@ -53,18 +56,32 @@ impl<T> Signed<T> {
         })
     }
 
-    pub fn verify(&self) -> color_eyre::Result<T>
+    pub fn verify(&self) -> color_eyre::Result<(X509, T)>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + HasCertificate,
     {
-        // TODO: verify trust of challenger
         ED25519.verify(
             Input::from(&self.signer_pubkey),
             Input::from(&self.message),
             Input::from(&self.signature),
         )?;
-        Ok(serde_json::from_slice::<T>(&self.message)?)
+        let message = serde_json::from_slice::<T>(&self.message)?;
+        // webpki (and rustls-webpki) don't give access to all certificate fields, so we've got to use openssl (for now)
+        let cert = X509::from_der(message.certificate())?;
+        assert!(cert.public_key()?.public_eq(
+            PKey::public_key_from_raw_bytes(&self.signer_pubkey, Id::ED25519)?.as_ref()
+        ));
+        // TODO: verify trust
+        // TODO: verify key usage
+        Ok((cert, message))
     }
+}
+
+/// A message type that contains an inner certificate
+///
+/// The certificate is stored inside of the message, so that it is also signed (preventing an unauthorized user from swapping between certificates using the same pubkey).
+pub trait HasCertificate {
+    fn certificate(&self) -> &[u8];
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -126,11 +143,25 @@ impl<T> Encrypted<T> {
 pub struct Challenge {
     pub nonce: [u8; aead::NONCE_LEN],
     pub challenger_session_key_public: Vec<u8>,
+    pub certificate: Vec<u8>,
+}
+
+impl HasCertificate for Challenge {
+    fn certificate(&self) -> &[u8] {
+        &self.certificate
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChallengeResponse {
     pub nonce: [u8; aead::NONCE_LEN],
+    pub certificate: Vec<u8>,
+}
+
+impl HasCertificate for ChallengeResponse {
+    fn certificate(&self) -> &[u8] {
+        &self.certificate
+    }
 }
 
 pub struct NonceManager {

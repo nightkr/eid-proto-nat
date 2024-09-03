@@ -3,6 +3,7 @@ use std::{path::PathBuf, pin::pin, sync::Arc};
 use clap::Parser;
 use eid_agent_proto::{ChallengeResponse, Encrypted, Request, Response, RpcMsg, Signed};
 use futures::{Sink, SinkExt, Stream, TryFutureExt, TryStreamExt};
+use openssl::x509::X509;
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use tokio::{fs, net::TcpListener};
 use tracing::Instrument;
@@ -12,6 +13,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 struct Opts {
     #[clap(long)]
     key: PathBuf,
+    #[clap(long)]
+    cert: PathBuf,
 }
 
 #[tokio::main]
@@ -26,18 +29,20 @@ async fn main() -> color_eyre::Result<()> {
     let keypair = Arc::new(Ed25519KeyPair::from_pkcs8_maybe_unchecked(
         &fs::read(&opts.key).await?,
     )?);
+    let cert = Arc::new(X509::from_pem(&fs::read(&opts.cert).await?)?);
     let rng = SystemRandom::new();
     let listener = TcpListener::bind(("127.0.0.1", 9187)).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
     loop {
         let (sock, peer) = listener.accept().await?;
         let keypair = keypair.clone();
+        let cert = cert.clone();
         let rng = rng.clone();
         tokio::spawn(
             async move {
                 tracing::info!("new connection");
                 let sock = tokio_tungstenite::accept_async(sock).await?;
-                handle_socket(sock, &rng, &keypair).await
+                handle_socket(sock, &rng, &keypair, &cert).await
             }
             .unwrap_or_else(|error: color_eyre::Report| {
                 tracing::error!(?error, "error processing connection")
@@ -51,6 +56,7 @@ async fn handle_socket<S>(
     sock: S,
     rng: &SystemRandom,
     keypair: &Ed25519KeyPair,
+    cert: &X509,
 ) -> color_eyre::Result<()>
 where
     S: Stream<Item = tungstenite::Result<tungstenite::Message>>
@@ -69,10 +75,11 @@ where
         let res: Response = match req.msg {
             Request::Ping => Response::Ok,
             Request::Identify { challenge } => {
-                let challenge = challenge.verify()?;
+                let (challenger_cert, challenge) = challenge.verify()?;
                 // TODO: prompt user for confirmation
                 let response = ChallengeResponse {
                     nonce: challenge.nonce,
+                    certificate: cert.to_der()?,
                 };
 
                 Response::SignedChallenge {

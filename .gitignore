@@ -5,3 +5,4 @@ tmp/
 
 target/
 *.key
+*.crt

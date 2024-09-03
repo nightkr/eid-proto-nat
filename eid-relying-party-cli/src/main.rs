@@ -7,6 +7,7 @@ use clap::Parser;
 use color_eyre::eyre::{Context, ContextCompat};
 use eid_agent_proto::{Challenge, Request, Response, RpcMsg, Signed};
 use futures::{Sink, SinkExt, Stream, TryStreamExt};
+use openssl::x509::X509;
 use pin_project::pin_project;
 use ring::{
     agreement::{self, X25519},
@@ -23,6 +24,8 @@ struct Opts {
 
     #[clap(long)]
     key: PathBuf,
+    #[clap(long)]
+    cert: PathBuf,
 }
 
 #[tokio::main]
@@ -35,6 +38,7 @@ async fn main() -> color_eyre::Result<()> {
         .init();
     let opts = Opts::parse();
     let keypair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&fs::read(&opts.key).await?)?;
+    let cert = X509::from_pem(&fs::read(&opts.cert).await?)?;
     let rng = SystemRandom::new();
     let mut conn = pin!(AgentClient::new(
         tokio_tungstenite::connect_async(&opts.agent).await?.0
@@ -47,6 +51,7 @@ async fn main() -> color_eyre::Result<()> {
             .compute_public_key()?
             .as_ref()
             .to_vec(),
+        certificate: cert.to_der()?,
     };
     let challenge_response = dbg!(
         conn.send_request(Request::Identify {
@@ -58,11 +63,18 @@ async fn main() -> color_eyre::Result<()> {
         Response::SignedChallenge { response_token } => {
             let response_token =
                 response_token.decrypt(challenger_session_key_private, challenge.nonce)?;
-            let response = response_token.verify()?;
+            let (user_cert, response) = response_token.verify()?;
+            let identities = user_cert
+                .subject_alt_names()
+                .into_iter()
+                .flatten()
+                .filter_map(|name| Some(name.uri()?.to_string()))
+                .collect::<Vec<_>>();
             assert_eq!(response.nonce, challenge.nonce);
             tracing::info!(
                 nonce = ?response.nonce,
                 pubkey = ?response_token.signer_pubkey,
+                ?identities,
                 "authentication succeeded!"
             );
         }
